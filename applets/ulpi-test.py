@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pylint: disable=maybe-no-member
 #
 # This file is part of LUNA.
 #
@@ -22,10 +23,11 @@ from luna.gateware.utils.cdc          import synchronize
 from luna.gateware.utils              import rising_edge_detector
 from luna.gateware.architecture.car   import LunaECP5DomainGenerator
 from luna.gateware.interface.spi      import SPIRegisterInterface, SPIMultiplexer, SPIBus
-
 from luna.gateware.interface.ulpi     import UMTITranslator
+from luna.gateware.usb.analyzer       import USBAnalyzer
 
-REGISTER_ILA = 2
+
+ANALYZER_RESULT = 2
 
 
 class ULPIDiagnostic(Elaboratable):
@@ -47,7 +49,7 @@ class ULPIDiagnostic(Elaboratable):
         m.d.comb += spi_registers.spi.connect(board_spi)
 
         # Create our UMTI translator.
-        ulpi = platform.request("sideband_phy")
+        ulpi = platform.request("target_phy")
         m.submodules.umti = umti = UMTITranslator(ulpi=ulpi)
 
 
@@ -61,25 +63,36 @@ class ULPIDiagnostic(Elaboratable):
 
         # Hook up our LEDs to status signals.
         m.d.comb += [
-            platform.request("led", 0)  .eq(umti.vbus_valid),
-            platform.request("led", 1)  .eq(umti.session_valid),
-            platform.request("led", 2)  .eq(umti.session_end),
+            platform.request("led", 2)  .eq(umti.session_valid),
             platform.request("led", 3)  .eq(umti.rx_active),
             platform.request("led", 4)  .eq(umti.rx_error)
         ]
 
         spi_registers.add_read_only_register(1, read=umti.last_rx_command)
 
-
-        # For debugging: mirror some ULPI signals on the UIO.
-        user_io = Cat(platform.request("user_io", i, dir="o") for i in range(0, 4))
+        # Set up our parameters.
         m.d.comb += [
-            user_io[0]  .eq(ClockSignal("ulpi")),
-            user_io[1]  .eq(ulpi.dir),
-            user_io[2]  .eq(ulpi.nxt),
-            user_io[3]  .eq(ulpi.stp),
+
+            # Set our mode to non-driving and full speed.
+            umti.op_mode     .eq(0b00),
+            umti.xcvr_select .eq(0b01),
+
+            # Disable the DP/DM pull resistors.
+            umti.dm_pulldown .eq(0),
+            umti.dm_pulldown .eq(0),
+            umti.term_select .eq(0)
         ]
 
+
+        # Create a USB analyzer, and connect a register up to its output.
+        m.submodules.analyzer = analyzer = USBAnalyzer(umti_interface=umti)
+        spi_registers.add_read_only_register(ANALYZER_RESULT, read=analyzer.data_out, read_strobe=analyzer.next)
+
+        m.d.comb += [
+            platform.request("led", 0)  .eq(analyzer.capturing),
+            platform.request("led", 1)  .eq(analyzer.data_available),
+            platform.request("led", 5)  .eq(analyzer.overrun)
+        ]
 
         # Return our elaborated module.
         return m
